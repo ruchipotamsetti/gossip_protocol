@@ -1,13 +1,30 @@
-// --- Topology Builder Duties ---
+import gleam/otp/actor
+import gossip_protocol/topology/full_network
+import gossip_protocol/topology/imperfect_3D
+import gossip_protocol/topology/line
+import gossip_protocol/topology/three_D
+import algo/gossip_algo
+import algo/push_sum
 
-// 1. Receive Build Command
-//    - Accept `num_nodes`, `topology_type`, `algorithm_type`, and `main_pid` as input.
+pub fn build(
+  num_nodes: Int,
+  topology: String,
+  algorithm: String,
+  main_pid: actor.Pid,
 
-// 2. Route the Command
-//    - Use a `case` statement on the `algo type` string:
-//      route to specific neighbour functions in alog/
-//    - if topo is 3D or imperfect 3D , call the prebuild fucntions
+) -> List(actor.Subject) {
+  case topology {
+    "3D" -> three_D.build(num_nodes, algorithm, main_pid)
+    "imp3D" ->
+      imperfect_3D.build(num_nodes, algorithm, main_pid)
+    _ -> Nil
+  }
 
-// 3. Return the Result
-//    - Return the list of `actor_subjects` that was given back by the specific
-//      topology file to main.
+  list_of_subjects = case algorithm {
+    "gossip" -> gossip_algo.build(num_nodes,toplology, algorithm, main_pid)
+    "push-sum" -> push_sum.build(num_nodes,topology, algorithm, main_pid)
+    _ -> Nil
+  }
+
+  list_of_subjects
+}
