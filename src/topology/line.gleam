@@ -23,5 +23,3 @@
 // 4. Distribute Neighbor Lists
 //    - Send a `SetNeighbors` message to subject `i`, containing its list of neighbor subjects.
 
-// 5. Return to Main
-//    - Once all actors have been configured, return the complete list of subjects.
