@@ -1,12 +1,11 @@
+import algo/gossip_algo
+import algo/push_sum
+import gleam/erlang/process
 import gleam/list
-import gleam/otp/actor
-import gossip_protocol/algo/gossip_algo
-import gossip_protocol/algo/push_sum
-import gossip_protocol/gossip_protocol.{MainMessage}
-import gossip_protocol/topology/full_network
-import gossip_protocol/topology/imperfect_3D
-import gossip_protocol/topology/line
-import gossip_protocol/topology/three_D
+import topology/full_network
+import topology/imperfect_three_d
+import topology/line
+import topology/three_d
 
 pub type NodeSubject {
   Gossip(gossip_algo.NodeSubject)
@@ -17,7 +16,7 @@ pub fn build(
   num_nodes: Int,
   topology: String,
   algorithm: String,
-  main_subject: actor.Subject(MainMessage),
+  main_subject: process.Subject(a),
 ) -> List(NodeSubject) {
   case algorithm {
     "gossip" -> {
@@ -29,5 +28,16 @@ pub fn build(
       |> list.map(PushSum)
     }
     _ -> []
+  }
+}
+
+pub fn kick_off(subjects: List(NodeSubject)) {
+  case list.first(subjects) {
+    Error(_) -> Nil
+    Ok(first) ->
+      case first {
+        Gossip(node) -> process.send(node, gossip_algo.Gossip)
+        PushSum(node) -> process.send(node, push_sum.Start)
+      }
   }
 }

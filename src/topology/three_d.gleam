@@ -3,8 +3,8 @@ import gleam/list
 
 // Helper function to convert 1D index to 3D coordinates
 fn to_3d(index: Int, dim: Int) -> #(Int, Int, Int) {
-  let z = index / (dim * dim)
-  let y = (index % (dim * dim)) / dim
+  let z = index / {dim * dim}
+  let y = {index % {dim * dim}} / dim
   let x = index % dim
   #(x, y, z)
 }

@@ -1,180 +1,144 @@
-// ---gossip algo ---
-
-// create a sub_list of subjects of lenght N+1
-//inside  a loop of 1...N do : 
-//     initialize a actor/
-//     store its subject at sub_list[i]
-// 
-
-//inside a loop of 1...N again
-//     update the state : provide the actors its own subject and the subject of its neighbours in a list
-//     to find the neighbours call the relevant function in topology
-
-
-
-// 2. Message Handling (Main Loop)
-//    - Wait for and react to different messages:
-//      - On `SetNeighbors(subjects)`: Store the list of subjects in my state.
-//      - On `Gossip` from a neighbor: Update my `rumor_heard_count`. Check if I'm finished.
-//      - On `PushSum(s, w)` from a neighbor: Update my `s` and `w` values. Check if I'm finished.
-//      - On `GossipTick` from myself:
-//        - Pick a random neighbor subject from my list.
-//        - Send it the appropriate message (`Gossip` or `PushSum(s/2, w/2)`).
-
-// 3. Termination Logic
-//    - After handling any message, check if my termination condition is met:
-//      - (For gossip: `rumor_heard_count` >= 10?)
-//      - (For push-sum: `s/w` ratio is stable for 3 rounds?)
-//    - If the condition is met:
-//      - Send one final `ActorFinished` message to the `main_pid`.
-//      - Stop my own process.
-
-import gleam/otp/actor
-import gleam/erlang/process as process
+import gleam/erlang/process
 import gleam/erlang/process.{send_after}
 import gleam/list
-import gleam/option.{None, Some}
-import gleam/result
-import gleam/prng
-import gossip_protocol/gossip_protocol.{type MainMessage, ActorFinished}
-import gossip_protocol/topology/line
-import gossip_protocol/topology/full_network
-import gossip_protocol/topology/imperfect_3D
-import gossip_protocol/topology/three_D
+import gleam/otp/actor
+import gleam/random
+import gossip_protocol.{type MainMessage, ActorFinished}
+import topology/full_network
+import topology/imperfect_three_d
+import topology/line
+import topology/three_d
 
-// A unique, type-safe handle for communicating with an actor.
+// A subject that can receive gossip-messages
 pub type NodeSubject =
   process.Subject(Message)
 
-// All possible messages an actor can receive for the gossip algorithm.
+// Messages this actor understands
 pub type Message {
-  // From Main: The initial configuration of this node's neighbors.
-  SetNeighbors(subjects: List(NodeSubject))
-  // From Main or Neighbor: The message that starts the gossip process.
+  SetNeighbours(List(NodeSubject))
   Gossip
-  // From Self: A recurring timer tick that triggers this node to act.
-  GossipTick
+  // somebody sent us the rumour
+  Tick
+  // internal timer
 }
 
-// All the data a node needs to remember.
+// Node-state
 pub type State {
   State(
-    main_subject: process.Subject(MainMessage), // The Subject of the main process to report back to.
-    neighbors: List(NodeSubject), // A list of neighbor subjects to talk to.
-    has_rumor: Bool, // Tracks if this node has heard the rumor yet.
-    rumor_heard_count: Int, // How many times this node has heard the rumor.
-    is_active: Bool, // Tracks if this node should still be sending messages.
-    prng: prng.Prng, // A random number generator for picking neighbors.
+    main: process.Subject(MainMessage),
+    self: NodeSubject,
+    neighbours: List(NodeSubject),
+    heard_cnt: Int,
+    active: Bool,
   )
 }
 
-// This is the actor's main message-handling loop.
-pub fn loop(message: Message, state: State) -> actor.Next(State) {
-  case message {
-    // ---- Handle receiving the neighbor list from Main ----
-    SetNeighbors(subjects) -> {
-      let new_state = State(..state, neighbors: subjects)
-      actor.Continue(new_state)
-    }
+// ------------ public entry points ---------------------------------
 
-    // ---- Handle receiving a gossip message ----
-    Gossip -> {
-      let new_count = state.rumor_heard_count + 1
-      let mut new_state = State(..state, rumor_heard_count: new_count)
-
-      // How an actor becomes active:
-      // If this is the FIRST time hearing the rumor, become active and start
-      // our own periodic timer to begin gossiping to others.
-      if !state.has_rumor {
-        new_state = State(..new_state, has_rumor: True, is_active: True)
-        send_after(GossipTick, 100) // Send the first tick to ourself.
-      }
-
-      // How an actor becomes inactive:
-      // If we've heard the rumor 10 times, we stop gossiping.
-      if new_count >= 10 && state.is_active {
-        new_state = State(..new_state, is_active: False)
-        // Our final duty: tell Main we are finished and stop ourselves.
-        process.send(state.main_subject, ActorFinished(average: None))
-        actor.Stop(process.Normal)
-      }
-
-      actor.Continue(new_state)
-    }
-
-    // ---- Handle our own periodic timer tick ----
-    GossipTick -> {
-      // Only send a message if we are still active.
-      if state.is_active {
-        case list.is_empty(state.neighbors) {
-          True -> actor.Continue(state)
-          False -> {
-            let #(index, new_prng) =
-              prng.int(state.prng, 0, list.length(state.neighbors) - 1)
-            let neighbor = result.unwrap(
-              list.at(state.neighbors, index),
-              // This is safe because we checked that the list is not empty.
-              list.first(state.neighbors) |> result.unwrap(Nil),
-            )
-            process.send(neighbor, Gossip)
-            send_after(GossipTick, 100)
-            actor.Continue(State(..state, prng: new_prng))
-          }
-        }
-      } else {
-        // If we get a tick but are no longer active, just ignore it.
-        actor.Continue(state)
-      }
-    }
-  }
-}
-
-// The public function used by the topology builder to start a new actor.
 pub fn start(
-  main_subject: process.Subject(MainMessage),
-  prng: prng.Prng,
+  main: process.Subject(MainMessage),
 ) -> Result(NodeSubject, actor.StartError) {
-  actor.new_with_initialiser(fn(self_subject) {
-    let state = State(
-      main_subject: main_subject,
-      neighbors: [],
-      has_rumor: False,
-      rumor_heard_count: 0,
-      is_active: False, // An actor starts in an inactive state.
-      prng: prng,
-    )
-    Ok(actor.initialised(state))
+  actor.new(fn(self_subj) {
+    let st =
+      State(
+        main: main,
+        self: self_subj,
+        neighbours: [],
+        heard_cnt: 0,
+        active: False,
+      )
+    Ok(actor.initialised(st))
   })
   |> actor.on_message(loop)
   |> actor.start()
 }
 
+// Factory for all nodes, used by builder.gleam
 pub fn build(
-  num_nodes: Int,
+  nodes: Int,
   topology: String,
-  main_subject: process.Subject(MainMessage),
+  main: process.Subject(MainMessage),
 ) -> List(NodeSubject) {
-  // --- PHASE 1: SPAWN AND COLLECT ---
-  let prng = prng.new(123)
   let subjects =
-    list.range(1, num_nodes)
-    |> list.try_map(fn(_) { start(main_subject, prng) })
+    list.range(1, nodes)
+    |> list.try_map(fn(_) { start(main) })
     |> result.unwrap([])
 
-  // --- PHASE 2: CONFIGURE AND DISTRIBUTE ---
-  list.each_with_index(subjects, fn(subject, i) {
-    let node_index = i + 1
-    let neighbour_indices = case topology {
-      "line" -> line.find_neighbours(node_index, num_nodes)
-      "full" -> full_network.find_neighbours(node_index, num_nodes)
-      "3D" -> three_D.find_neighbours(node_index, num_nodes)
-      "imp3D" -> imperfect_3D.find_neighbours(node_index, num_nodes)
+  list.indexed_map(subjects, fn(i, sub) {
+    let idx = i + 1
+    let idxs = case topology {
+      "line" -> line.find_neighbours(idx, nodes)
+      "full" -> full_network.find_neighbours(idx, nodes)
+      "3D" -> three_d.find_neighbours(idx, nodes)
+      "imp3D" -> imperfect_three_d.find_neighbours(idx, nodes)
       _ -> []
     }
-    let neighbour_subjects =
-      list.filter_map(neighbour_indices, fn(index) { list.at(subjects, index - 1) })
-    process.send(subject, SetNeighbors(neighbour_subjects))
+    let neighs = list.filter_map(idxs, fn(j) { list.get(subjects, j - 1) })
+    process.send(sub, SetNeighbours(neighs))
   })
 
   subjects
+}
+
+// ------------------------------------------------------------------
+
+fn loop(state: State, msg: Message) -> actor.Next(State, Message) {
+  case msg {
+    SetNeighbours(ns) -> actor.continue(State(..state, neighbours: ns))
+
+    Gossip -> gossip_received(state)
+
+    Tick -> on_tick(state)
+  }
+}
+
+// ------- helpers --------------------------------------------------
+
+fn gossip_received(state: State) -> actor.Next(State, Message) {
+  let cnt = state.heard_cnt + 1
+  let state1 = State(..state, heard_cnt: cnt)
+
+  let state2 = case state.active {
+    False -> {
+      process.send_after(state.self, 30, Tick)
+      // start ticking
+      State(..state1, active: True)
+    }
+    True -> state1
+  }
+
+  case cnt >= 10 {
+    True -> {
+      process.send(state.main, ActorFinished(None))
+      actor.stop()
+    }
+    False -> actor.continue(state2)
+  }
+}
+
+fn on_tick(state: State) -> actor.Next(State, Message) {
+  case state.active {
+    False -> actor.continue(state)
+    True -> {
+      case get_random(state.neighbours) {
+        None -> actor.continue(state)
+        Some(n) -> {
+          process.send(n, Gossip)
+          process.send_after(state.self, 30, Tick)
+          actor.continue(state)
+        }
+      }
+    }
+  }
+}
+
+// ------------- small util because std-lib hasn’t get_random --------
+fn get_random(xs: List(a)) -> Option(a) {
+  case list.length(xs) {
+    0 -> None
+    len -> {
+      let idx = random.int(0, len - 1)
+      result.to_option(list.get(xs, idx))
+    }
+  }
 }

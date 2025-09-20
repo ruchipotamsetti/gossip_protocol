@@ -1,184 +1,142 @@
-import gleam/erlang/process as process
+import gleam/erlang/process
 import gleam/erlang/process.{send_after}
-import gleam/int
 import gleam/float
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/otp/actor
-import gleam/prng
+import gleam/random
 import gleam/result
-import gossip_protocol/gossip_protocol.{type MainMessage, ActorFinished}
-import gossip_protocol/topology/full_network
-import gossip_protocol/topology/imperfect_3D
-import gossip_protocol/topology/line
-import gossip_protocol/topology/three_D
+import topology/full_network
+import topology/imperfect_three_d
+import topology/line
+import topology/three_d
 
-// A unique, type-safe handle for communicating with an actor.
 pub type NodeSubject =
   process.Subject(Message)
 
-// All possible messages an actor can receive for the push-sum algorithm.
 pub type Message {
-  SetNeighbors(subjects: List(NodeSubject))
-  StartPushSum
-  PushSum(s: Int, w: Int)
-  PushSumTick
+  SetNeighbours(List(NodeSubject))
+  Start
+  Pair(s: Float, w: Float)
+  Tick
 }
 
-// All the data a node needs to remember.
 pub type State {
   State(
-    s: Int,
-    w: Int,
-    main_subject: process.Subject(MainMessage),
-    neighbors: List(NodeSubject),
-    ratio_history: List(Float),
-    prng: prng.Prng,
-    is_active: Bool,
+    main: process.Subject(a),
+    neighbours: List(NodeSubject),
+    s: Float,
+    w: Float,
+    history: List(Float),
+    active: Bool,
   )
 }
 
-// The scaling factor for our fixed-point arithmetic. 10^16.
-const scaling_factor = 1_000_000_000_000_0000
-
-pub fn build(
-  num_nodes: Int,
-  topology: String,
-  main_subject: process.Subject(MainMessage),
-) -> List(NodeSubject) {
-  // --- PHASE 1: SPAWN AND COLLECT ---
-  let prng = prng.new(123)
-  let subjects =
-    list.range(1, num_nodes)
-    |> list.try_map(fn(i) { start(main_subject, i, prng) })
-    |> result.unwrap([])
-
-  // --- PHASE 2: CONFIGURE AND DISTRIBUTE ---
-  list.each_with_index(subjects, fn(subject, i) {
-    let node_index = i + 1
-    let neighbour_indices = case topology {
-      "line" -> line.find_neighbours(node_index, num_nodes)
-      "full" -> full_network.find_neighbours(node_index, num_nodes)
-      "3D" -> three_D.find_neighbours(node_index, num_nodes)
-      "imp3D" -> imperfect_3D.find_neighbours(node_index, num_nodes)
-      _ -> []
-    }
-    let neighbour_subjects =
-      list.filter_map(neighbour_indices, fn(index) { list.at(subjects, index - 1) })
-    process.send(subject, SetNeighbors(neighbour_subjects))
-  })
-
-  subjects
-}
+const scale = 10_000_000_000_000_000.0
 
 pub fn start(
-  main_subject: process.Subject(MainMessage),
-  initial_s: Int,
-  prng: prng.Prng,
+  main: process.Subject(a),
+  id: Int,
 ) -> Result(NodeSubject, actor.StartError) {
-  actor.new_with_initialiser(fn(self_subject) {
-    let state = State(
-      s: initial_s * scaling_factor,
-      w: scaling_factor,
-      main_subject: main_subject,
-      neighbors: [],
-      ratio_history: [],
-      prng: prng,
-      is_active: False,
-    )
-    Ok(actor.initialised(state))
+  actor.new(
+    State(
+      main: main,
+      neighbours: [],
+      s: float.from_int(id) *. scale,
+      w: scale,
+      history: [],
+      active: False,
+    ),
+    loop,
+  )
+  |> actor.start
+}
+
+pub fn build(
+  nodes: Int,
+  topology: String,
+  main: process.Subject(a),
+) -> List(NodeSubject) {
+  let subs =
+    list.range(1, nodes)
+    |> list.try_map(fn(i) { start(main, i) })
+    |> result.unwrap([])
+
+  list.indexed_map(subs, fn(i, sub) {
+    let idx = i + 1
+    let idxs = case topology {
+      "line" -> line.find_neighbours(idx, nodes)
+      "full" -> full_network.find_neighbours(idx, nodes)
+      "3D" -> three_d.find_neighbours(idx, nodes)
+      "imp3D" -> imperfect_three_d.find_neighbours(idx, nodes)
+      _ -> []
+    }
+    let neighs = list.filter_map(idxs, fn(j) { list.get(subs, j - 1) })
+    process.send(sub, SetNeighbours(neighs))
   })
-  |> actor.on_message(loop)
-  |> actor.start()
+
+  subs
 }
 
-// The actor's main message-handling loop.
-pub fn loop(msg: Message, state: State) -> actor.Next(State) {
+// --------- loop --------------------------------------------------
+
+fn loop(state: State, msg: Message) -> actor.Next(State, Message) {
   case msg {
-    SetNeighbors(subjects) -> {
-      let new_state = State(..state, neighbors: subjects)
-      actor.Continue(new_state)
+    SetNeighbours(ns) -> actor.continue(State(..state, neighbours: ns))
+
+    Start -> {
+      send_after(Tick, 30)
+      actor.continue(State(..state, active: True))
     }
 
-    StartPushSum -> {
-      send_after(PushSumTick, 100)
-      actor.Continue(State(..state, is_active: True))
-    }
+    Pair(s, w) -> actor.continue(State(..state, s: state.s + s, w: state.w + w))
 
-    PushSum(s, w) -> {
-      let new_state = State(..state, s: state.s + s, w: state.w + w)
-      send_after(PushSumTick, 1) // Send immediately after receiving
-      actor.Continue(new_state)
-    }
+    Tick -> on_tick(state)
+  }
+}
 
-    PushSumTick -> {
-      if state.is_active {
-        case list.is_empty(state.neighbors) {
-          True -> actor.Continue(state)
-          False -> {
-            let #(index, new_prng) =
-              prng.int(state.prng, 0, list.length(state.neighbors) - 1)
-            let neighbor = result.unwrap(list.at(state.neighbors, index), Nil)
+fn on_tick(state: State) -> actor.Next(State, Message) {
+  case state.active && !list.is_empty(state.neighbours) {
+    False -> actor.continue(state)
+    True -> {
+      // choose neighbour
+      let idx = random.int(0, list.length(state.neighbours) - 1)
+      let neigh =
+        result.unwrap(
+          list.get(state.neighbours, idx),
+          // idx is in range, but provide fallback to satisfy type checker
+          result.unwrap(list.first(state.neighbours), panic("empty")),
+        )
 
-            let s_to_send = state.s / 2
-            let w_to_send = state.w / 2
-            let new_s = state.s - s_to_send
-            let new_w = state.w - w_to_send
-            let mut new_state = State(..state, s: new_s, w: new_w, prng: new_prng)
+      let s_half = state.s / 2.0
+      let w_half = state.w / 2.0
+      let new_state = State(..state, s: state.s - s_half, w: state.w - w_half)
 
-            process.send(neighbor, PushSum(s_to_send, w_to_send))
+      process.send(neigh, Pair(s_half, w_half))
 
-            case check_termination(new_state) {
-              Ok(terminated_state) -> {
-                let final_ratio =
-                  float.from_int(terminated_state.s)
-                  /. float.from_int(terminated_state.w)
-                process.send(
-                  terminated_state.main_subject,
-                  ActorFinished(average: Some(final_ratio)),
-                )
-                actor.Stop(process.Normal)
-              }
-              Error(active_state) -> {
-                send_after(PushSumTick, 100)
-                actor.Continue(active_state)
-              }
-            }
-          }
+      case stable(new_state) {
+        True -> {
+          let ratio = new_state.s /. new_state.w
+          process.send(state.main, Some(ratio))
+          actor.stop()
         }
-      } else {
-        actor.Continue(state)
+        False -> {
+          send_after(Tick, 30)
+          actor.continue(new_state)
+        }
       }
     }
   }
 }
 
-// Checks if the s/w ratio has stabilized.
-fn check_termination(state: State) -> Result(State, State) {
-  let current_ratio =
-    float.from_int(state.s) /. float.from_int(state.w)
-
-  let new_history = list.prepend(state.ratio_history, current_ratio)
-  let new_history = case list.length(new_history) > 3 {
-    True -> result.unwrap(list.drop_right(new_history, 1), [])
-    False -> new_history
+// termination check: 3 consecutive ratios within 1e-10
+fn stable(state: State) -> Bool {
+  let r = state.s /. state.w
+  let hist = [r, ..state.history] |> list.take(3)
+  case hist {
+    [a, b, c] ->
+      float.absolute_value(a -. b) < 1.0e-10
+      && float.absolute_value(b -. c) < 1.0e-10
+    _ -> False
   }
-  let new_state = State(..state, ratio_history: new_history)
-
-  case list.length(new_history) < 3 {
-    True -> Error(new_state)
-    False -> {
-      let first = result.unwrap(list.at(new_history, 0), 0.0)
-      let second = result.unwrap(list.at(new_history, 1), 0.0)
-      let third = result.unwrap(list.at(new_history, 2), 0.0)
-
-      let diff1 = float.absolute_value(first -. second)
-      let diff2 = float.absolute_value(second -. third)
-
-      case diff1 < 1.0e-10 && diff2 < 1.0e-10 {
-        True -> Ok(new_state)
-        False -> Error(new_state)
-      }
-    }
-  }
-} 
+}

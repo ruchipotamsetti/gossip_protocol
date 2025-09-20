@@ -1,5 +1,5 @@
 import argv
-import builder.{type NodeSubject}
+import builder
 import gleam/erlang/process
 import gleam/float
 import gleam/int
@@ -9,10 +9,6 @@ import gleam/option.{None, Some}
 import gleam/otp/actor
 import gleam/result
 import parser
-import algo/gossip_algo
-import algo/gossip_algo.{type NodeSubject as GossipNodeSubject}
-import algo/push_sum
-import algo/push_sum.{type NodeSubject as PushSumNodeSubject}
 
 // The message type for the main actor. It handles messages from child actors.
 pub type MainMessage {
@@ -25,11 +21,7 @@ pub type MainMessage {
 
 // The state for the main actor.
 type MainState {
-  MainState(
-    actors_remaining: Int,
-    total_actors: Int,
-    start_time: Int,
-  )
+  MainState(actors_remaining: Int, total_actors: Int, start_time: Int)
 }
 
 // --- Main Process Duties ---
@@ -54,7 +46,7 @@ pub fn main() {
         |> actor.from_state(state)
         |> actor.start
 
-      assert Ok(main_subject) = spec
+      let Ok(main_subject) = spec
 
       let subjects =
         builder.build(
@@ -69,6 +61,9 @@ pub fn main() {
         main_subject,
         StartSimulation(subjects: subjects, algorithm: parsed.algorithm),
       )
+
+      // Kick off first node
+      builder.kick_off(subjects)
     }
     Error(msg) -> io.println(msg)
   }
@@ -104,9 +99,9 @@ fn main_loop(message: MainMessage, state: MainState) -> actor.Next(MainState) {
       }
 
       let new_remaining = state.actors_remaining - 1
-      let finish_threshold = (state.total_actors * 99) / 100
+      let finish_threshold = { state.total_actors * 99 } / 100
 
-      case (state.total_actors - new_remaining) >= finish_threshold {
+      case { state.total_actors - new_remaining } >= finish_threshold {
         True -> {
           let end_time = process.system_time(process.Millisecond)
           let duration = end_time - state.start_time
