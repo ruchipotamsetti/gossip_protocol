@@ -23,3 +23,12 @@
 // 4. Distribute Neighbor Lists
 //    - Send a `SetNeighbors` message to subject `i`, containing its list of neighbor subjects.
 
+import gleam/list
+
+pub fn find_neighbours(node_index: Int, num_nodes: Int) -> List(Int) {
+  case node_index {
+    1 -> [2]
+    _ if node_index == num_nodes -> [node_index - 1]
+    _ -> [node_index - 1, node_index + 1]
+  }
+}

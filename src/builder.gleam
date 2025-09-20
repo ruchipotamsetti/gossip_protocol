@@ -13,12 +13,6 @@ pub fn build(
   main_pid: actor.Pid,
 
 ) -> List(actor.Subject) {
-  case topology {
-    "3D" -> three_D.build(num_nodes, algorithm, main_pid)
-    "imp3D" ->
-      imperfect_3D.build(num_nodes, algorithm, main_pid)
-    _ -> Nil
-  }
 
   list_of_subjects = case algorithm {
     "gossip" -> gossip_algo.build(num_nodes,toplology, algorithm, main_pid)
