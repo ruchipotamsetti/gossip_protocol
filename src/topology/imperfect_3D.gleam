@@ -6,7 +6,7 @@ import gossip_protocol/topology/three_D
 
 pub fn find_neighbours(node_index: Int, num_nodes: Int) -> List(Int) {
   let initial_neighbours = three_D.find_neighbours(node_index, num_nodes)
-  let potential_random_neighbour = random.int_from(0, to: num_nodes - 1)
+  let potential_random_neighbour = random.int_from(1, to: num_nodes)
 
   case
     list.contains(initial_neighbours, potential_random_neighbour)

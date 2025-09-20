@@ -30,11 +30,13 @@
 //      - Stop my own process.
 
 import gleam/otp/actor
-import gleam/erlang/process.{Pid, Subject, send_after}
+import gleam/erlang/process as process
+import gleam/erlang/process.{send_after}
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/prng
+import gossip_protocol/gossip_protocol.{type MainMessage, ActorFinished}
 import gossip_protocol/topology/line
 import gossip_protocol/topology/full_network
 import gossip_protocol/topology/imperfect_3D
@@ -42,7 +44,7 @@ import gossip_protocol/topology/three_D
 
 // A unique, type-safe handle for communicating with an actor.
 pub type NodeSubject =
-  Subject(Message)
+  process.Subject(Message)
 
 // All possible messages an actor can receive for the gossip algorithm.
 pub type Message {
@@ -57,19 +59,13 @@ pub type Message {
 // All the data a node needs to remember.
 pub type State {
   State(
-    main_pid: Pid, // The PID of the main process to report back to.
+    main_subject: process.Subject(MainMessage), // The Subject of the main process to report back to.
     neighbors: List(NodeSubject), // A list of neighbor subjects to talk to.
     has_rumor: Bool, // Tracks if this node has heard the rumor yet.
     rumor_heard_count: Int, // How many times this node has heard the rumor.
     is_active: Bool, // Tracks if this node should still be sending messages.
     prng: prng.Prng, // A random number generator for picking neighbors.
   )
-}
-
-// The message type the Main process expects.
-pub type MainMessage {
-  ActorSubjectIs(subject: NodeSubject)
-  ActorFinished
 }
 
 // This is the actor's main message-handling loop.
@@ -98,8 +94,9 @@ pub fn loop(message: Message, state: State) -> actor.Next(State) {
       // If we've heard the rumor 10 times, we stop gossiping.
       if new_count >= 10 && state.is_active {
         new_state = State(..new_state, is_active: False)
-        // Our final duty: tell Main we are finished.
-        process.send(state.main_pid, ActorFinished)
+        // Our final duty: tell Main we are finished and stop ourselves.
+        process.send(state.main_subject, ActorFinished(average: None))
+        actor.Stop(process.Normal)
       }
 
       actor.Continue(new_state)
@@ -134,19 +131,18 @@ pub fn loop(message: Message, state: State) -> actor.Next(State) {
 
 // The public function used by the topology builder to start a new actor.
 pub fn start(
-  main_pid: Pid,
+  main_subject: process.Subject(MainMessage),
   prng: prng.Prng,
 ) -> Result(NodeSubject, actor.StartError) {
   actor.new_with_initialiser(fn(self_subject) {
     let state = State(
-      main_pid: main_pid,
+      main_subject: main_subject,
       neighbors: [],
       has_rumor: False,
       rumor_heard_count: 0,
       is_active: False, // An actor starts in an inactive state.
       prng: prng,
     )
-    process.send(main_pid, ActorSubjectIs(self_subject))
     Ok(actor.initialised(state))
   })
   |> actor.on_message(loop)
@@ -156,26 +152,27 @@ pub fn start(
 pub fn build(
   num_nodes: Int,
   topology: String,
-  main_pid: Pid,
+  main_subject: process.Subject(MainMessage),
 ) -> List(NodeSubject) {
   // --- PHASE 1: SPAWN AND COLLECT ---
   let prng = prng.new(123)
   let subjects =
-    list.range(0, num_nodes - 1)
-    |> list.try_map(fn(_) { start(main_pid, prng) })
+    list.range(1, num_nodes)
+    |> list.try_map(fn(_) { start(main_subject, prng) })
     |> result.unwrap([])
 
   // --- PHASE 2: CONFIGURE AND DISTRIBUTE ---
   list.each_with_index(subjects, fn(subject, i) {
+    let node_index = i + 1
     let neighbour_indices = case topology {
-      "line" -> line.find_neighbours(i, num_nodes)
-      "full" -> full_network.find_neighbours(i, num_nodes)
-      "3D" -> three_D.find_neighbours(i, num_nodes)
-      "imp3D" -> imperfect_3D.find_neighbours(i, num_nodes)
+      "line" -> line.find_neighbours(node_index, num_nodes)
+      "full" -> full_network.find_neighbours(node_index, num_nodes)
+      "3D" -> three_D.find_neighbours(node_index, num_nodes)
+      "imp3D" -> imperfect_3D.find_neighbours(node_index, num_nodes)
       _ -> []
     }
     let neighbour_subjects =
-      list.filter_map(neighbour_indices, fn(index) { list.at(subjects, index) })
+      list.filter_map(neighbour_indices, fn(index) { list.at(subjects, index - 1) })
     process.send(subject, SetNeighbors(neighbour_subjects))
   })
 

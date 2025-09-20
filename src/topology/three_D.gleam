@@ -15,8 +15,9 @@ fn to_1d(x: Int, y: Int, z: Int, dim: Int) -> Int {
 }
 
 pub fn find_neighbours(node_index: Int, num_nodes: Int) -> List(Int) {
+  let zero_based_index = node_index - 1
   let dim = int.power(num_nodes, 1.0 / 3.0) |> int.round
-  let #(x, y, z) = to_3d(node_index, dim)
+  let #(x, y, z) = to_3d(zero_based_index, dim)
   let neighbours = []
 
   // X-axis neighbors
@@ -48,6 +49,7 @@ pub fn find_neighbours(node_index: Int, num_nodes: Int) -> List(Int) {
   }
 
   neighbours
+  |> list.map(fn(idx) { idx + 1 })
 }
 
 //returns the neighbours of a node in  a 3D toplology

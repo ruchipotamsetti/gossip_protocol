@@ -28,7 +28,7 @@ import gleam/list
 pub fn find_neighbours(node_index: Int, num_nodes: Int) -> List(Int) {
   case node_index {
     1 -> [2]
-    _ if node_index == num_nodes -> [node_index - 1]
+    _ if node_index == num_nodes -> [num_nodes - 1]
     _ -> [node_index - 1, node_index + 1]
   }
 }
